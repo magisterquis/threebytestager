@@ -32,14 +32,6 @@ type file struct {
 	contents []byte  /* Contents of file */
 }
 
-const (
-	/* firstByte is the first byte of all DNS replies */
-	firstByte = 17
-
-	/* TTL is the time-to-live value in returned data */
-	TTL = 600
-)
-
 var (
 	/* pool is the packet buffer pool */
 	pool = &sync.Pool{New: func() interface{} { return make([]byte, 1024) }}
@@ -49,7 +41,7 @@ var (
 	filesL sync.RWMutex
 
 	/* errorResource is the A resource body to return on error */
-	errorResource = dnsmessage.AResource{A: [4]byte{firstByte, 0, 0, 0}}
+	errorResource = dnsmessage.AResource{A: [4]byte{0, 0, 0, 0}}
 )
 
 func main() {
@@ -63,6 +55,16 @@ func main() {
 			"listen",
 			"0.0.0.0:53",
 			"Listen `address` for DNS service",
+		)
+		firstByte = flag.Uint(
+			"first-octet",
+			17,
+			"First `octet` to set in A records",
+		)
+		ttl = flag.Uint64(
+			"ttl",
+			300,
+			"Response time to live, in `seconds`",
 		)
 	)
 	flag.Usage = func() {
@@ -85,6 +87,18 @@ Options:
 	}
 	flag.Parse()
 
+	/* Make sure our first octet is an octet */
+	if 0xFF < *firstByte {
+		log.Fatalf("First octet must be <= 255")
+	}
+	fb := byte(*firstByte)
+	errorResource.A[0] = fb
+
+	/* Make sure the TTL isn't too much */
+	if math.MaxUint32 < *ttl {
+		log.Fatalf("TTL is too large")
+	}
+
 	/* Listen for DNS requests */
 	pc, err := net.ListenPacket("udp", *laddr)
 	if nil != err {
@@ -102,14 +116,21 @@ Options:
 		}
 		/* Handle it */
 		go func() {
-			go handle(pc, addr, buf[:n], *dir)
+			go handle(pc, addr, buf[:n], *dir, uint32(*ttl), fb)
 			pool.Put(buf)
 		}()
 	}
 }
 
 /* handle get the bytes requested.  If a file's not been read, it gets read */
-func handle(pc net.PacketConn, addr net.Addr, qbuf []byte, dir string) {
+func handle(
+	pc net.PacketConn,
+	addr net.Addr,
+	qbuf []byte,
+	dir string,
+	ttl uint32,
+	fb byte, /* First byte in replies */
+) {
 	/* Answer resource */
 	var a dnsmessage.AResource
 	a.A = errorResource.A
@@ -141,7 +162,7 @@ func handle(pc net.PacketConn, addr net.Addr, qbuf []byte, dir string) {
 				Name:  m.Questions[0].Name,
 				Type:  dnsmessage.TypeA,
 				Class: dnsmessage.ClassINET,
-				TTL:   TTL,
+				TTL:   ttl,
 			},
 			Body: &a,
 		})
@@ -186,7 +207,7 @@ func handle(pc net.PacketConn, addr net.Addr, qbuf []byte, dir string) {
 	fname := strings.ToLower(parts[1])
 
 	/* Make sure we have this file */
-	if err := ensureFile(dir, fname); nil != err {
+	if err := ensureFile(dir, fname, fb); nil != err {
 		log.Printf("%v Unpossible file %q", tag, fname)
 		return
 	}
@@ -197,7 +218,7 @@ func handle(pc net.PacketConn, addr net.Addr, qbuf []byte, dir string) {
 		a.A = getSize(fname)
 	} else {
 		var ok bool
-		a.A, ok = getOffset(fname, offset)
+		a.A, ok = getOffset(fname, offset, fb)
 		if !ok {
 			log.Printf("%v Too-large offset %v", tag, offset)
 			return
@@ -207,7 +228,7 @@ func handle(pc net.PacketConn, addr net.Addr, qbuf []byte, dir string) {
 
 /* ensureFile tries to ensure the file named n is in the map.  If it's not able
 to be put there, it returns an error. */
-func ensureFile(dir, n string) error {
+func ensureFile(dir, n string, fb byte) error {
 	filesL.Lock()
 	defer filesL.Unlock()
 
@@ -234,7 +255,7 @@ func ensureFile(dir, n string) error {
 	if 0 != a[0] {
 		return errors.New("file too large")
 	}
-	a[0] = firstByte
+	a[0] = fb
 
 	/* TODO: Some sort of caching */
 
@@ -262,8 +283,8 @@ func getSize(n string) [4]byte {
 }
 
 /* getOffset gets the 3 bytes at the given offset.  The first byte of the
-returned array is always firstByte. */
-func getOffset(n string, offset uint32) ([4]byte, bool) {
+returned array is always fb. */
+func getOffset(n string, offset uint32, fb byte) ([4]byte, bool) {
 	filesL.RLock()
 	defer filesL.RUnlock()
 
@@ -278,7 +299,7 @@ func getOffset(n string, offset uint32) ([4]byte, bool) {
 	if uint32(len(f.contents)-1) < offset {
 		return a, false
 	}
-	a[0] = firstByte
+	a[0] = fb
 	copy(a[1:], f.contents[offset:])
 	return a, true
 }
