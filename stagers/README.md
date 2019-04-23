@@ -6,6 +6,6 @@ changing.
 
 Name          | Description
 --------------|---------------------------------------------------------------------------
-dnsstager.c   | The original stager.
+dnsstager.c   | The original stager
 dl.sh         | Shell one-liner which downloads and writes a file to disk and then runs it
 downloader.pl | Perl script which downloads a file and writes it to stdout
